@@ -1,0 +1,662 @@
+---
+title: "GDPR analysis"
+date: 2020-04-02
+slug: "beer-production"
+tags: [rstats,tidymodels]
+---
+
+
+
+<div id="introduction" class="section level1">
+<h1>Introduction</h1>
+<p>For this first post I will show an example of using newly launched <a href="https://www.tidymodels.org/">tidymodels</a>,
+which is a new packages that make it easiler to make models. To test the packages functionality
+I will work on an dataset for GDPR violation and see which gives the biggest fines.</p>
+<div id="explore-the-date" class="section level2">
+<h2>Explore the date</h2>
+<p>Our modelling goal here is to understand which GDOR violations gives the higest fines. Before I
+will look at the data it is reasonable to understand some of the GDPR articles and
+what they are about:</p>
+<ul>
+<li><strong>Article 5:</strong> principles for processing personal data (legitimate purpose, limited)</li>
+<li><strong>Article 6:</strong> lawful processing of personal data (i.e. consent, etc)</li>
+<li><strong>Article 13:</strong> inform subject when personal data is collected</li>
+<li><strong>Article 15:</strong> right of access by data subject</li>
+<li><strong>Article 32:</strong> security of processing (i.e. data breaches)</li>
+</ul>
+<p>As a first step in analysis gdpr violations and get a understanding of tidymodels
+I will explore the data.</p>
+<pre class="r"><code>gdpr_raw</code></pre>
+<pre><code>## # A tibble: 250 x 11
+##       id picture name   price authority date  controller article_violated type 
+##    &lt;dbl&gt; &lt;chr&gt;   &lt;chr&gt;  &lt;dbl&gt; &lt;chr&gt;     &lt;chr&gt; &lt;chr&gt;      &lt;chr&gt;            &lt;chr&gt;
+##  1     1 https:~ Pola~   9380 Polish N~ 10/1~ Polish Ma~ Art. 28 GDPR     Non-~
+##  2     2 https:~ Roma~   2500 Romanian~ 10/1~ UTTIS IND~ Art. 12 GDPR|Ar~ Info~
+##  3     3 https:~ Spain  60000 Spanish ~ 10/1~ Xfera Mov~ Art. 5 GDPR|Art~ Non-~
+##  4     4 https:~ Spain   8000 Spanish ~ 10/1~ Iberdrola~ Art. 31 GDPR     Fail~
+##  5     5 https:~ Roma~ 150000 Romanian~ 10/0~ Raiffeise~ Art. 32 GDPR     Fail~
+##  6     6 https:~ Roma~  20000 Romanian~ 10/0~ Vreau Cre~ Art. 32 GDPR|Ar~ Fail~
+##  7     7 https:~ Gree~ 200000 Hellenic~ 10/0~ Telecommu~ Art. 5 (1) c) G~ Fail~
+##  8     8 https:~ Gree~ 200000 Hellenic~ 10/0~ Telecommu~ Art. 21 (3) GDP~ Fail~
+##  9     9 https:~ Spain  30000 Spanish ~ 10/0~ Vueling A~ Art. 5 GDPR|Art~ Non-~
+## 10    10 https:~ Roma~   9000 Romanian~ 09/2~ Inteligo ~ Art. 5 (1) a) G~ Non-~
+## # ... with 240 more rows, and 2 more variables: source &lt;chr&gt;, summary &lt;chr&gt;</code></pre>
+<p>How are they distributed?</p>
+<pre class="r"><code>gdpr_raw %&gt;%
+  ggplot(aes(
+    price + 1
+  )) +
+  geom_histogram() +
+  scale_x_log10(labels = scales::dollar_format(prefix = &quot;€&quot;)) +
+  labs(
+    x = &quot;GDPR fine (EUR)&quot;,
+    y = &quot;GDPR violations&quot;
+  ) +
+  theme_minimal()</code></pre>
+<p><img src="/blog/2020-05-02-gdpr-tidymodels-introduction_files/figure-html/unnamed-chunk-3-1.png" width="2400" /></p>
+<p>We will know make the data tidy:</p>
+<pre class="r"><code>gdp_tidy &lt;- gdpr_raw %&gt;%
+  # add nes variable and drops existing ones.
+  transmute(id,
+    price,
+    country = name,
+    article_violated,
+    articles = str_extract_all(
+      article_violated,
+      # Add regex to get numbers
+      # Have a look to see that some didt get becasue of missing space
+      &quot;Art. [:digit:]+|Art.[:digit:]+&quot;
+    )
+  ) %&gt;%
+  # more engerring
+  # more violations gives bigger fines
+  # Beacuse we know it is an integer we can say map_int
+  mutate(total_articles = map_int(articles, length)) %&gt;%
+  # by unnest we are gonna spread the articles.
+  unnest(articles) %&gt;%
+  # We can count the number of articles.
+  # There is 27 articles and is to many for our modelling
+  # this wee need to faut
+  # count(articles, sort = TRUE)
+  add_count(articles) %&gt;%
+  filter(n &gt; 10) %&gt;%
+  select(-n)
+# Kow we have a row for each violations and not
+gdp_tidy</code></pre>
+<pre><code>## # A tibble: 304 x 6
+##       id  price country article_violated                 articles total_articles
+##    &lt;dbl&gt;  &lt;dbl&gt; &lt;chr&gt;   &lt;chr&gt;                            &lt;chr&gt;             &lt;int&gt;
+##  1     2   2500 Romania Art. 12 GDPR|Art. 13 GDPR|Art. ~ Art. 13               4
+##  2     2   2500 Romania Art. 12 GDPR|Art. 13 GDPR|Art. ~ Art. 5                4
+##  3     2   2500 Romania Art. 12 GDPR|Art. 13 GDPR|Art. ~ Art. 6                4
+##  4     3  60000 Spain   Art. 5 GDPR|Art. 6 GDPR          Art. 5                2
+##  5     3  60000 Spain   Art. 5 GDPR|Art. 6 GDPR          Art. 6                2
+##  6     5 150000 Romania Art. 32 GDPR                     Art. 32               1
+##  7     6  20000 Romania Art. 32 GDPR|Art. 33 GDPR        Art. 32               2
+##  8     7 200000 Greece  Art. 5 (1) c) GDPR|Art. 25 GDPR  Art. 5                2
+##  9     9  30000 Spain   Art. 5 GDPR|Art. 6 GDPR          Art. 5                2
+## 10     9  30000 Spain   Art. 5 GDPR|Art. 6 GDPR          Art. 6                2
+## # ... with 294 more rows</code></pre>
+<p>How are the articles distributed over per article?</p>
+<pre class="r"><code>library(ggbeeswarm)
+
+gdp_tidy %&gt;%
+  mutate(
+    articles = str_replace_all(articles, &quot;Art. &quot;, &quot;Article &quot;),
+    articles = fct_reorder(articles, price)
+  ) %&gt;%
+  ggplot(aes(
+    articles, price + 1,
+    color = articles, fill = articles
+  )) +
+  geom_quasirandom() +
+  geom_boxplot(alpha = 0.2, outlier.colour = NA) +
+  scale_y_log10(labels = scales::dollar_format(prefix = &quot;£&quot;)) +
+  labs(
+    x = NULL, y = &quot;GDPR fine (EUR)&quot;,
+    title = &quot;GDPR fines levied by article&quot;,
+    subtitle = &quot;For 250 violations in 25 countries&quot;
+  ) +
+  theme_minimal() +
+  theme(legend.position = &quot;none&quot;)</code></pre>
+<p><img src="/blog/2020-05-02-gdpr-tidymodels-introduction_files/figure-html/unnamed-chunk-5-1.png" width="2400" /></p>
+<p>From the beeshart I can see that ther is a bug difference in the size of the fine and
+the different articles. Article 15 is accosiated with the smallest fine and for
+articles 5 and 6 you get a highere fine.</p>
+<p>Know I will prefer the data for the modelling.</p>
+<pre class="r"><code># Back to one row to on violation.
+gdpr_violation &lt;- gdp_tidy %&gt;%
+  mutate(value = 1) %&gt;%
+  select(-article_violated) %&gt;%
+  # article and value is gonna be maded wider
+  pivot_wider(
+    names_from = articles, values_from = value,
+    values_fn = list(value = max),
+    values_fill = list(value = 0)
+  ) %&gt;%
+  janitor::clean_names()
+
+gdpr_violation</code></pre>
+<pre><code>## # A tibble: 219 x 9
+##       id  price country total_articles art_13 art_5 art_6 art_32 art_15
+##    &lt;dbl&gt;  &lt;dbl&gt; &lt;chr&gt;            &lt;int&gt;  &lt;dbl&gt; &lt;dbl&gt; &lt;dbl&gt;  &lt;dbl&gt;  &lt;dbl&gt;
+##  1     2   2500 Romania              4      1     1     1      0      0
+##  2     3  60000 Spain                2      0     1     1      0      0
+##  3     5 150000 Romania              1      0     0     0      1      0
+##  4     6  20000 Romania              2      0     0     0      1      0
+##  5     7 200000 Greece               2      0     1     0      0      0
+##  6     9  30000 Spain                2      0     1     1      0      0
+##  7    10   9000 Romania              2      0     1     1      0      0
+##  8    11 195407 Germany              3      0     0     0      0      1
+##  9    12  10000 Belgium              1      0     1     0      0      0
+## 10    13 644780 Poland               1      0     0     0      1      0
+## # ... with 209 more rows</code></pre>
+<p>With this data we are ready to take the next step and start building our model.</p>
+</div>
+<div id="build-model" class="section level2">
+<h2>Build model</h2>
+<p>One key step before building the model is the prepocess the data.</p>
+<pre class="r"><code>library(tidymodels)
+# Data preprocessing
+gdpr_rec &lt;- recipe(price ~ ., data = gdpr_violation) %&gt;%
+  update_role(id, new_role = &quot;id&quot;) %&gt;%
+  step_log(price, base = 10, offset = 1, skip = TRUE) %&gt;% # skip: i tilfælde vi ikke har et outcome varibale
+  # There is to many country
+  step_other(country, other = &quot;Other&quot;) %&gt;%
+  step_dummy(all_nominal()) %&gt;%
+  # fjerner ting som ingen varians har.
+  step_zv(all_predictors())
+
+# We set a recipe to model our data.
+
+gdpr_prep &lt;- prep(gdpr_rec)
+
+# For train the model use prep
+gdpr_prep</code></pre>
+<pre><code>## Data Recipe
+## 
+## Inputs:
+## 
+##       role #variables
+##         id          1
+##    outcome          1
+##  predictor          7
+## 
+## Training data contained 219 data points and no missing data.
+## 
+## Operations:
+## 
+## Log transformation on price [trained]
+## Collapsing factor levels for country [trained]
+## Dummy variables from country [trained]
+## Zero variance filter removed no terms [trained]</code></pre>
+<p>The modelling process in tidymodels is build on a recipe like when you are baking.
+It makes sence because you can see both process as a algoritme, which is just some
+steps you are doing to complete your task.</p>
+<ul>
+<li>The first thing we need to specify is what are our model going to be and what
+data is it going to use.</li>
+<li>For the next part we need to identify what we consider predictor or outcome. Here it
+is important that we tell the recipe that <code>id</code> is not either but we want to keep it.</li>
+<li>The next step is to take the log of <code>price</code>, which is the amount of the fine.</li>
+<li>We only want to look at the important <code>country</code>, so the other we collapses with <code>Other</code>.</li>
+<li>At last we create an indicator variable and remove variable with zero variance.</li>
+</ul>
+<p>Until know we haven´t don anything but only defined a lot of stuff. With <code>prep</code>
+we evaluted our data.</p>
+<p>Here we introduced the <code>workflow()</code> which can be associates with lego blocks. Here
+we can have both the recipe and model (our model is a OLS model).</p>
+<pre class="r"><code># How does our data look like know?
+juice(gdpr_prep)</code></pre>
+<pre><code>## # A tibble: 219 x 14
+##       id total_articles art_13 art_5 art_6 art_32 art_15 price country_Czech.R~
+##    &lt;dbl&gt;          &lt;int&gt;  &lt;dbl&gt; &lt;dbl&gt; &lt;dbl&gt;  &lt;dbl&gt;  &lt;dbl&gt; &lt;dbl&gt;            &lt;dbl&gt;
+##  1     2              4      1     1     1      0      0  3.40                0
+##  2     3              2      0     1     1      0      0  4.78                0
+##  3     5              1      0     0     0      1      0  5.18                0
+##  4     6              2      0     0     0      1      0  4.30                0
+##  5     7              2      0     1     0      0      0  5.30                0
+##  6     9              2      0     1     1      0      0  4.48                0
+##  7    10              2      0     1     1      0      0  3.95                0
+##  8    11              3      0     0     0      0      1  5.29                0
+##  9    12              1      0     1     0      0      0  4.00                0
+## 10    13              1      0     0     0      1      0  5.81                0
+## # ... with 209 more rows, and 5 more variables: country_Germany &lt;dbl&gt;,
+## #   country_Hungary &lt;dbl&gt;, country_Romania &lt;dbl&gt;, country_Spain &lt;dbl&gt;,
+## #   country_Other &lt;dbl&gt;</code></pre>
+<pre class="r"><code># workflow, contain object that let you carrie stuff around.
+gdpr_workflow &lt;- workflow() %&gt;%
+  add_recipe(gdpr_rec) %&gt;%
+  add_model(linear_reg() %&gt;%
+    set_engine(&quot;lm&quot;))
+# I want a model wark flow and get a linear model.
+# prepoccesor + model
+#
+gdpr_workflow</code></pre>
+<pre><code>## == Workflow ======================================================================================================
+## Preprocessor: Recipe
+## Model: linear_reg()
+## 
+## -- Preprocessor --------------------------------------------------------------------------------------------------
+## 4 Recipe Steps
+## 
+## * step_log()
+## * step_other()
+## * step_dummy()
+## * step_zv()
+## 
+## -- Model ---------------------------------------------------------------------------------------------------------
+## Linear Regression Model Specification (regression)
+## 
+## Computational engine: lm</code></pre>
+<p>When we normally have a model we want to fit it. This is an important aspect in
+modelling because this tell us have well our model is.</p>
+<pre class="r"><code>gdpr_fit &lt;- gdpr_workflow %&gt;%
+  fit(data = gdpr_violation)
+
+(gdpr_fit)</code></pre>
+<pre><code>## == Workflow [trained] ============================================================================================
+## Preprocessor: Recipe
+## Model: linear_reg()
+## 
+## -- Preprocessor --------------------------------------------------------------------------------------------------
+## 4 Recipe Steps
+## 
+## * step_log()
+## * step_other()
+## * step_dummy()
+## * step_zv()
+## 
+## -- Model ---------------------------------------------------------------------------------------------------------
+## 
+## Call:
+## stats::lm(formula = formula, data = data)
+## 
+## Coefficients:
+##            (Intercept)          total_articles                  art_13  
+##                3.76607                 0.47957                -0.76251  
+##                  art_5                   art_6                  art_32  
+##               -0.41869                -0.55988                -0.15317  
+##                 art_15  country_Czech.Republic         country_Germany  
+##               -1.56765                -0.64953                 0.05974  
+##        country_Hungary         country_Romania           country_Spain  
+##               -0.15532                -0.34580                 0.42968  
+##          country_Other  
+##                0.23438</code></pre>
+<p>So we can fit a model or a workflow.</p>
+</div>
+<div id="explore-results" class="section level2">
+<h2>Explore results</h2>
+<p>Let us see if we can get anything out of weather country and fines are different.</p>
+<pre class="r"><code>gdpr_fit %&gt;%
+  pull_workflow_fit() %&gt;%
+  tidy() %&gt;%
+  arrange(estimate) %&gt;%
+  kable()</code></pre>
+<table>
+<thead>
+<tr class="header">
+<th align="left">term</th>
+<th align="right">estimate</th>
+<th align="right">std.error</th>
+<th align="right">statistic</th>
+<th align="right">p.value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">art_15</td>
+<td align="right">-1.5676538</td>
+<td align="right">0.4651576</td>
+<td align="right">-3.3701564</td>
+<td align="right">0.0008969</td>
+</tr>
+<tr class="even">
+<td align="left">art_13</td>
+<td align="right">-0.7625069</td>
+<td align="right">0.4074302</td>
+<td align="right">-1.8715031</td>
+<td align="right">0.0626929</td>
+</tr>
+<tr class="odd">
+<td align="left">country_Czech.Republic</td>
+<td align="right">-0.6495339</td>
+<td align="right">0.4667470</td>
+<td align="right">-1.3916188</td>
+<td align="right">0.1655387</td>
+</tr>
+<tr class="even">
+<td align="left">art_6</td>
+<td align="right">-0.5598765</td>
+<td align="right">0.2950382</td>
+<td align="right">-1.8976404</td>
+<td align="right">0.0591419</td>
+</tr>
+<tr class="odd">
+<td align="left">art_5</td>
+<td align="right">-0.4186949</td>
+<td align="right">0.2828869</td>
+<td align="right">-1.4800789</td>
+<td align="right">0.1403799</td>
+</tr>
+<tr class="even">
+<td align="left">country_Romania</td>
+<td align="right">-0.3457980</td>
+<td align="right">0.4325560</td>
+<td align="right">-0.7994295</td>
+<td align="right">0.4249622</td>
+</tr>
+<tr class="odd">
+<td align="left">country_Hungary</td>
+<td align="right">-0.1553232</td>
+<td align="right">0.4790037</td>
+<td align="right">-0.3242631</td>
+<td align="right">0.7460679</td>
+</tr>
+<tr class="even">
+<td align="left">art_32</td>
+<td align="right">-0.1531725</td>
+<td align="right">0.3146769</td>
+<td align="right">-0.4867613</td>
+<td align="right">0.6269450</td>
+</tr>
+<tr class="odd">
+<td align="left">country_Germany</td>
+<td align="right">0.0597408</td>
+<td align="right">0.4189434</td>
+<td align="right">0.1425986</td>
+<td align="right">0.8867465</td>
+</tr>
+<tr class="even">
+<td align="left">country_Other</td>
+<td align="right">0.2343787</td>
+<td align="right">0.3551225</td>
+<td align="right">0.6599939</td>
+<td align="right">0.5099950</td>
+</tr>
+<tr class="odd">
+<td align="left">country_Spain</td>
+<td align="right">0.4296805</td>
+<td align="right">0.3643060</td>
+<td align="right">1.1794494</td>
+<td align="right">0.2395796</td>
+</tr>
+<tr class="even">
+<td align="left">total_articles</td>
+<td align="right">0.4795667</td>
+<td align="right">0.1656494</td>
+<td align="right">2.8950705</td>
+<td align="right">0.0041993</td>
+</tr>
+<tr class="odd">
+<td align="left">(Intercept)</td>
+<td align="right">3.7660677</td>
+<td align="right">0.4089156</td>
+<td align="right">9.2098904</td>
+<td align="right">0.0000000</td>
+</tr>
+</tbody>
+</table>
+<p>The results makes perfectly sense and we see that if you have many GDPR violation
+then the fine is bigger.</p>
+<pre class="r"><code>gdpr_fit %&gt;%
+  pull_workflow_fit() %&gt;%
+  tidy() %&gt;%
+  filter(p.value &lt; 0.05) %&gt;%
+  arrange(estimate) %&gt;%
+  kable()</code></pre>
+<table>
+<thead>
+<tr class="header">
+<th align="left">term</th>
+<th align="right">estimate</th>
+<th align="right">std.error</th>
+<th align="right">statistic</th>
+<th align="right">p.value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">art_15</td>
+<td align="right">-1.5676538</td>
+<td align="right">0.4651576</td>
+<td align="right">-3.370156</td>
+<td align="right">0.0008969</td>
+</tr>
+<tr class="even">
+<td align="left">total_articles</td>
+<td align="right">0.4795667</td>
+<td align="right">0.1656494</td>
+<td align="right">2.895071</td>
+<td align="right">0.0041993</td>
+</tr>
+<tr class="odd">
+<td align="left">(Intercept)</td>
+<td align="right">3.7660677</td>
+<td align="right">0.4089156</td>
+<td align="right">9.209890</td>
+<td align="right">0.0000000</td>
+</tr>
+</tbody>
+</table>
+<p>If you violates art_15 which is if you dont give the right of access by data subject,
+then you get a lower fine.</p>
+<p>What if we relax it a litlle bit?</p>
+<pre class="r"><code>gdpr_fit %&gt;%
+  pull_workflow_fit() %&gt;%
+  tidy() %&gt;%
+  filter(p.value &lt; 0.1) %&gt;%
+  kable()</code></pre>
+<table>
+<thead>
+<tr class="header">
+<th align="left">term</th>
+<th align="right">estimate</th>
+<th align="right">std.error</th>
+<th align="right">statistic</th>
+<th align="right">p.value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">(Intercept)</td>
+<td align="right">3.7660677</td>
+<td align="right">0.4089156</td>
+<td align="right">9.209890</td>
+<td align="right">0.0000000</td>
+</tr>
+<tr class="even">
+<td align="left">total_articles</td>
+<td align="right">0.4795667</td>
+<td align="right">0.1656494</td>
+<td align="right">2.895071</td>
+<td align="right">0.0041993</td>
+</tr>
+<tr class="odd">
+<td align="left">art_13</td>
+<td align="right">-0.7625069</td>
+<td align="right">0.4074302</td>
+<td align="right">-1.871503</td>
+<td align="right">0.0626929</td>
+</tr>
+<tr class="even">
+<td align="left">art_6</td>
+<td align="right">-0.5598765</td>
+<td align="right">0.2950382</td>
+<td align="right">-1.897640</td>
+<td align="right">0.0591419</td>
+</tr>
+<tr class="odd">
+<td align="left">art_15</td>
+<td align="right">-1.5676538</td>
+<td align="right">0.4651576</td>
+<td align="right">-3.370156</td>
+<td align="right">0.0008969</td>
+</tr>
+</tbody>
+</table>
+<p>Here we see that violation of article 13, 6 and 15 gives you are smaller fine.</p>
+<p>We know want to explore the result even more and try to predict. Here tidymodels is
+really good.</p>
+<p>As we have seen from the resulta we have big p-values. But I understand the results
+better if I see them visual. I will make prediction with the help of <code>workflow()</code></p>
+<p>Let´s create some example new data that we are interested in.</p>
+<pre class="r"><code>new_data &lt;- crossing(
+  country = &quot;Other&quot;,
+  art_5 = 0:1,
+  art_6 = 0:1,
+  art_13 = 0:1,
+  art_15 = 0:1,
+  art_32 = 0:1
+) %&gt;%
+  mutate(
+    total_articles = art_5 +
+      art_6 +
+      art_13 +
+      art_15 +
+      art_32,
+    id = row_number()
+  )
+
+new_data %&gt;%
+  head() %&gt;%
+  kable()</code></pre>
+<table>
+<thead>
+<tr class="header">
+<th align="left">country</th>
+<th align="right">art_5</th>
+<th align="right">art_6</th>
+<th align="right">art_13</th>
+<th align="right">art_15</th>
+<th align="right">art_32</th>
+<th align="right">total_articles</th>
+<th align="right">id</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">Other</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">Other</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">2</td>
+</tr>
+<tr class="odd">
+<td align="left">Other</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">1</td>
+<td align="right">3</td>
+</tr>
+<tr class="even">
+<td align="left">Other</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">2</td>
+<td align="right">4</td>
+</tr>
+<tr class="odd">
+<td align="left">Other</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+<td align="right">5</td>
+</tr>
+<tr class="even">
+<td align="left">Other</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">1</td>
+<td align="right">2</td>
+<td align="right">6</td>
+</tr>
+</tbody>
+</table>
+<p>The above code are making some new data. With the new data we can make prediction
+analysis. In the next step I will calculate the mean and confidence interval.</p>
+<pre class="r"><code>mean_pred &lt;- predict(gdpr_fit,
+  new_data = new_data
+)
+
+conf_int_pred &lt;- predict(gdpr_fit,
+  new_data = new_data,
+  type = &quot;conf_int&quot;
+)
+gdpr_res &lt;- new_data %&gt;%
+  bind_cols(mean_pred) %&gt;%
+  bind_cols(conf_int_pred)
+
+gdpr_res</code></pre>
+<pre><code>## # A tibble: 32 x 11
+##    country art_5 art_6 art_13 art_15 art_32 total_articles    id .pred
+##    &lt;chr&gt;   &lt;int&gt; &lt;int&gt;  &lt;int&gt;  &lt;int&gt;  &lt;int&gt;          &lt;int&gt; &lt;int&gt; &lt;dbl&gt;
+##  1 Other       0     0      0      0      0              0     1  4.00
+##  2 Other       0     0      0      0      1              1     2  4.33
+##  3 Other       0     0      0      1      0              1     3  2.91
+##  4 Other       0     0      0      1      1              2     4  3.24
+##  5 Other       0     0      1      0      0              1     5  3.72
+##  6 Other       0     0      1      0      1              2     6  4.04
+##  7 Other       0     0      1      1      0              2     7  2.63
+##  8 Other       0     0      1      1      1              3     8  2.96
+##  9 Other       0     1      0      0      0              1     9  3.92
+## 10 Other       0     1      0      0      1              2    10  4.25
+## # ... with 22 more rows, and 2 more variables: .pred_lower &lt;dbl&gt;,
+## #   .pred_upper &lt;dbl&gt;</code></pre>
+<p>Know we have the prediction in log euros. We also see we can get the confidence
+interval.</p>
+<p>From the res we have that for different amount violation what can we predict
+what they have violated.</p>
+<pre class="r"><code>gdpr_res %&gt;%
+  filter(total_articles == 1) %&gt;%
+  pivot_longer(art_5:art_32) %&gt;%
+  filter(value &gt; 0) %&gt;%
+  mutate(
+    name = str_replace_all(name, &quot;art_&quot;, &quot;Article &quot;),
+    name = fct_reorder(name, .pred)
+  ) %&gt;%
+  ggplot(aes(name, 10^.pred, color = name)) +
+  geom_point(size = 3.5) +
+  geom_errorbar(aes(
+    ymin = 10^.pred_lower,
+    ymax = 10^.pred_upper
+  ),
+  width = 0.2, alpha = 0.7
+  ) +
+  theme_minimal() +
+  labs(
+    x = NULL, y = &quot;Increase in fine (EUR)&quot;,
+    title = &quot;Predicted fine for each type of GDPR article violation&quot;,
+    subtitle = &quot;Modeling based on 250 violations in 25 countries&quot;
+  ) +
+  scale_y_log10(labels = scales::dollar_format(prefix = &quot;€&quot;, accuracy = 1)) +
+  theme(legend.position = &quot;none&quot;)</code></pre>
+<p><img src="/blog/2020-05-02-gdpr-tidymodels-introduction_files/figure-html/unnamed-chunk-16-1.png" width="2400" /></p>
+<p>Know we have a model over the how expensive each fine are and which will give
+you the highest.</p>
+</div>
+</div>
